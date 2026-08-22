@@ -11,6 +11,7 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/onering"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/browser_dialer"
 	"github.com/xtls/xray-core/transport/internet/stat"
@@ -46,9 +47,27 @@ func init() {
 func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig, ed []byte) (net.Conn, error) {
 	wsSettings := streamSettings.ProtocolSettings.(*Config)
 
+	// Get Onering config from TLS settings if available
+	var oneringCfg *onering.Config
+	tConfig := tls.ConfigFromStreamSettings(streamSettings)
+	if tConfig != nil {
+		oneringCfg = tConfig.GetOneringConfig()
+	}
+
+	// Override destination if Onering is enabled
+	actualDest := dest
+	if oneringCfg != nil && oneringCfg.Enabled {
+		// Dial to bug domain instead of real domain
+		actualDest = net.Destination{
+			Network: dest.Network,
+			Address: net.ParseAddress(oneringCfg.BugDomain),
+			Port:    dest.Port,
+		}
+	}
+
 	dialer := &websocket.Dialer{
 		NetDial: func(network, addr string) (net.Conn, error) {
-			conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
+			conn, err := internet.DialSystem(ctx, actualDest, streamSettings.SocketSettings)
 			if err != nil {
 				return nil, err
 			}
@@ -71,7 +90,6 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 
 	protocol := "ws"
 
-	tConfig := tls.ConfigFromStreamSettings(streamSettings)
 	if tConfig != nil {
 		protocol = "wss"
 		tlsConfig := tConfig.GetTLSConfig(tls.WithDestination(dest), tls.WithNextProto("http/1.1"))
@@ -79,7 +97,7 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 		if fingerprint := tls.GetFingerprint(tConfig.Fingerprint); fingerprint != nil {
 			dialer.NetDialTLSContext = func(_ context.Context, _, addr string) (net.Conn, error) {
 				// Like the NetDial in the dialer
-				pconn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
+				pconn, err := internet.DialSystem(ctx, actualDest, streamSettings.SocketSettings)
 				if err != nil {
 					errors.LogErrorInner(ctx, err, "failed to dial to "+addr)
 					return nil, err
@@ -111,13 +129,20 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 		}
 	}
 
-	host := dest.NetAddr()
-	if (protocol == "ws" && dest.Port == 80) || (protocol == "wss" && dest.Port == 443) {
-		host = dest.Address.String()
-	}
-	uri := protocol + "://" + host + wsSettings.GetNormalizedPath()
-
 	if browser_dialer.HasBrowserDialer() {
+		// For Browser Dialer's optimized IP and non-standard port
+		host := wsSettings.Host
+		if host == "" && tConfig.ServerName != "" {
+			host = tConfig.ServerName
+		}
+		if host == "" {
+			host = actualDest.Address.String()
+		}
+		if !(protocol == "ws" && actualDest.Port == 80) && !(protocol == "wss" && actualDest.Port == 443) {
+			host += ":" + actualDest.Port.String()
+		}
+		uri := protocol + "://" + host + wsSettings.GetNormalizedPath()
+
 		conn, err := browser_dialer.DialWS(uri, ed)
 		if err != nil {
 			return nil, err
@@ -126,14 +151,26 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 		return NewConnection(conn, conn.RemoteAddr(), nil, wsSettings.HeartbeatPeriod), nil
 	}
 
-	header := wsSettings.GetRequestHeader()
-	// See dialer.DialContext()
-	header.Set("Host", wsSettings.Host)
-	if header.Get("Host") == "" && tConfig != nil {
-		header.Set("Host", tConfig.ServerName)
+	host := actualDest.Address.String()
+	if !(protocol == "ws" && actualDest.Port == 80) && !(protocol == "wss" && actualDest.Port == 443) {
+		host += ":" + actualDest.Port.String()
 	}
-	if header.Get("Host") == "" {
-		header.Set("Host", dest.Address.String())
+	uri := protocol + "://" + host + wsSettings.GetNormalizedPath()
+
+	header := wsSettings.GetRequestHeader()
+	
+	// Set Host header - use real domain if Onering is enabled
+	if oneringCfg != nil && oneringCfg.Enabled {
+		header.Set("Host", oneringCfg.RealDomain)
+	} else {
+		// Original logic: prefer wsSettings.Host, then tConfig.ServerName, then dest address
+		header.Set("Host", wsSettings.Host)
+		if header.Get("Host") == "" && tConfig != nil {
+			header.Set("Host", tConfig.ServerName)
+		}
+		if header.Get("Host") == "" {
+			header.Set("Host", dest.Address.String())
+		}
 	}
 	if ed != nil {
 		// RawURLEncoding is support by both V2Ray/V2Fly and XRay.
