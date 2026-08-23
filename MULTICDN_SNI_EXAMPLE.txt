@@ -1,0 +1,22 @@
+# Multi-CDN SNI Format Examples
+# Copy-paste these directly into v2rayNG SNI field
+
+# Example 1: Basic two-CDN setup
+zoom.us,myserver.example.com
+
+# Example 2: Three CDNs with labels
+onering=zoom.us,ruangguru=ruangguru.com,zenius=zenius.net,myserver.example.com
+
+# Example 3: Mixed (with and without labels)
+onering=zoom.us,cloudflare.com,backup=fastly.net,myserver.example.com
+
+# Example 4: No labels (auto-generates cdn1, cdn2, cdn3)
+zoom.us,aws.amazon.com,discord.com,myserver.example.com
+
+# Example 5: Indonesian ISP optimization
+telkomsel=zoom.us,indosat=wa.me,xl=ruangguru.com,myserver.example.com
+
+# Example 6: Simple failover (primary + backup)
+primary=cloudflare.com,backup=fastly.net,myserver.example.com
+
+# IMPORTANT: Last value is always the real server domain!

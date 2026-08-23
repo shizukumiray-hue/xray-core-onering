@@ -30,8 +30,9 @@ type Config struct {
 
 // Parse parses onering format string
 // Formats:
-//   - Single CDN: "onering:real.domain.com:bug.domain.com"
-//   - Multi-CDN: "onering-multi:real.domain.com"
+//   - Single CDN (old): "onering:real.domain.com:bug.domain.com"
+//   - Multi-CDN (old): "onering-multi:real.domain.com"
+//   - Multi-CDN (new SNI): "onering=bug-zoom.us,ruangguru=ruangguru.com,zenius=zenius.net,host.com"
 // Returns Config or error if invalid format
 func Parse(input string) (*Config, error) {
 	// Empty input = disabled
@@ -39,7 +40,12 @@ func Parse(input string) (*Config, error) {
 		return &Config{Enabled: false}, nil
 	}
 
-	// Check for multi-CDN format first
+	// Check for new comma-separated Multi-CDN format
+	if strings.Contains(input, ",") {
+		return parseMultiCDNFromSNI(input)
+	}
+
+	// Check for old multi-CDN format
 	if strings.HasPrefix(input, MultiCDNPrefix) {
 		return parseMultiCDN(input)
 	}
@@ -117,6 +123,113 @@ func parseMultiCDN(input string) (*Config, error) {
 		BugDomain:       "", // Will be selected by MultiCDNManager
 		MultiCDNEnabled: true,
 		MultiCDNManager: nil, // Will be set later by TLS config
+	}, nil
+}
+
+// parseMultiCDNFromSNI parses comma-separated Multi-CDN format from SNI field
+// Format: "onering=bug-zoom.us,ruangguru=ruangguru.com,zenius=zenius.net,host.com"
+// - Multiple CDNs separated by comma ","
+// - Each CDN has format: "label=domain" or just "domain"
+// - Label is optional (can be "onering=", "ruangguru=", etc.)
+// - Last value after comma is the actual server host (e.g., "host.com")
+// - Space after comma is trimmed
+func parseMultiCDNFromSNI(input string) (*Config, error) {
+	// Split by comma
+	parts := strings.Split(input, ",")
+	if len(parts) < 2 {
+		// Not enough parts for Multi-CDN format
+		return nil, errors.New("invalid Multi-CDN format: expected at least 2 comma-separated values")
+	}
+
+	// Last part is the server host (real domain)
+	realDomain := strings.TrimSpace(parts[len(parts)-1])
+	
+	// Validate real domain
+	if realDomain == "" {
+		return nil, errors.New("real domain (last value) cannot be empty")
+	}
+	if containsInvalidChars(realDomain) {
+		return nil, errors.New("real domain contains invalid characters")
+	}
+
+	// Parse CDN entries (all except last)
+	var cdnProviders []*CDNProvider
+	for i := 0; i < len(parts)-1; i++ {
+		part := strings.TrimSpace(parts[i])
+		
+		// Skip empty entries
+		if part == "" {
+			continue
+		}
+
+		var label, cdnDomain string
+		
+		// Check if has label: "onering=bug-zoom.us"
+		if strings.Contains(part, "=") {
+			kv := strings.SplitN(part, "=", 2)
+			label = strings.TrimSpace(kv[0])
+			cdnDomain = strings.TrimSpace(kv[1])
+		} else {
+			// No label, just domain
+			label = fmt.Sprintf("cdn%d", i+1) // Auto-generate label
+			cdnDomain = part
+		}
+
+		// Validate CDN domain
+		if cdnDomain == "" {
+			return nil, fmt.Errorf("CDN domain at position %d cannot be empty", i+1)
+		}
+		if containsInvalidChars(cdnDomain) {
+			return nil, fmt.Errorf("CDN domain at position %d contains invalid characters", i+1)
+		}
+
+		// Create CDN provider
+		priority := 100 - (i * 10) // Descending priority: 100, 90, 80, ...
+		if priority < 10 {
+			priority = 10
+		}
+
+		cdnProviders = append(cdnProviders, &CDNProvider{
+			Name:       label,
+			BugDomain:  cdnDomain,
+			Priority:   priority,
+			ISPs:       []string{}, // Available for all ISPs
+			Healthy:    true,
+			FailCount:  0,
+			AvgLatency: 0,
+		})
+	}
+
+	// Validate we have at least one CDN
+	if len(cdnProviders) == 0 {
+		return nil, errors.New("no valid CDN providers found")
+	}
+
+	// Create Multi-CDN manager with parsed providers
+	multiCDNConfig := &MultiCDNConfig{
+		Enabled:   true,
+		Providers: cdnProviders,
+		Strategy:  NewStrategy(StrategyRoundRobin), // Default to round-robin
+		HealthCheck: HealthCheckConfig{
+			Enabled:  false, // Disabled by default for SNI-based config
+			Interval: 30 * 1000000000, // 30 seconds
+			Timeout:  5 * 1000000000,  // 5 seconds
+		},
+		Failover: FailoverConfig{
+			MaxRetries:        3,
+			BlacklistDuration: 5 * 60 * 1000000000, // 5 minutes
+			FallbackToSingle:  true,
+		},
+	}
+
+	manager := NewMultiCDNManager(multiCDNConfig)
+
+	return &Config{
+		Enabled:         true,
+		RealDomain:      realDomain,
+		BugDomain:       "", // Will be selected dynamically
+		MultiCDNEnabled: true,
+		MultiCDNManager: manager,
 	}, nil
 }
 
