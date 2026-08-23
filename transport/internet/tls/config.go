@@ -429,10 +429,18 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 	}
 
 	if sn := c.parseServerName(); len(sn) > 0 {
-		// Check if this is an Onering format: onering:real:bug
+		// Check if this is an Onering format: onering:real:bug or onering-multi:real
 		if oneringCfg, err := onering.Parse(sn); err == nil && oneringCfg.Enabled {
-			// Use bug domain as SNI for TLS handshake
-			config.ServerName = oneringCfg.GetTLSSNI()
+			// Multi-CDN: use dynamically selected bug domain
+			if oneringCfg.MultiCDNEnabled && oneringCfg.MultiCDNManager != nil {
+				config.ServerName = oneringCfg.GetTLSSNI()
+				
+				// Apply random TLS fingerprint for DPI evasion (Phase 2)
+				config = oneringCfg.MultiCDNManager.GetRandomTLSConfig(config)
+			} else {
+				// Single-CDN: use bug domain as SNI for TLS handshake
+				config.ServerName = oneringCfg.GetTLSSNI()
+			}
 		} else {
 			// Normal ServerName
 			config.ServerName = sn

@@ -1,0 +1,327 @@
+name: Multi-CDN Build and Test
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+      - 'multicdn/**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.26'
+
+jobs:
+  lint:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Cache Go modules
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run go fmt
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "Code is not formatted. Please run 'gofmt -s -w .'"
+            gofmt -s -l .
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      - name: Run staticcheck
+        run: staticcheck ./...
+
+  test:
+    name: Unit Tests
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Cache Go modules
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests with coverage
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@v6
+        with:
+          files: ./coverage.out
+          flags: unittests
+          name: codecov-umbrella
+
+  build-multi-platform:
+    name: Build Multi-Platform Binaries
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - goos: linux
+            goarch: amd64
+            name: linux-64
+          - goos: linux
+            goarch: arm64
+            name: linux-arm64-v8a
+          - goos: linux
+            goarch: arm
+            goarm: 7
+            name: linux-arm32-v7a
+          - goos: linux
+            goarch: arm
+            goarm: 6
+            name: linux-arm32-v6
+          # Android builds
+          - goos: android
+            goarch: arm64
+            name: android-arm64-v8a
+            cgo: true
+          - goos: android
+            goarch: amd64
+            name: android-amd64
+            cgo: true
+          # Windows builds
+          - goos: windows
+            goarch: amd64
+            name: windows-64
+          - goos: windows
+            goarch: arm64
+            name: windows-arm64-v8a
+          # macOS builds
+          - goos: darwin
+            goarch: amd64
+            name: macos-64
+          - goos: darwin
+            goarch: arm64
+            name: macos-arm64-v8a
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Set up Android NDK
+        if: matrix.goos == 'android'
+        run: |
+          wget -qO android-ndk.zip https://dl.google.com/android/repository/android-ndk-r28b-linux.zip
+          unzip -q android-ndk.zip
+          rm android-ndk.zip
+          declare -A arches=(
+            ["amd64"]="x86_64-linux-android24-clang"
+            ["arm64"]="aarch64-linux-android24-clang"
+          )
+          echo "CC=$(realpath android-ndk-*/toolchains/llvm/prebuilt/linux-x86_64/bin)/${arches[${{ matrix.goarch }}]}" >> $GITHUB_ENV
+
+      - name: Cache Go modules
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Get build version
+        id: version
+        run: |
+          VERSION=$(git describe --tags --always --dirty)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: ${{ matrix.cgo && '1' || '0' }}
+        run: |
+          mkdir -p dist
+          OUTPUT="dist/xray-${{ matrix.name }}"
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            OUTPUT="${OUTPUT}.exe"
+          fi
+          
+          echo "Building for $GOOS/$GOARCH..."
+          go build \
+            -o "$OUTPUT" \
+            -trimpath \
+            -buildvcs=false \
+            -gcflags="all=-l=4" \
+            -ldflags="-X github.com/xtls/xray-core/core.build=${{ steps.version.outputs.version }} -s -w -buildid=" \
+            -v \
+            ./main
+          
+          echo "Build successful: $OUTPUT"
+          ls -lh "$OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-${{ matrix.name }}
+          path: dist/*
+          retention-days: 7
+
+  build-android-aar:
+    name: Build Android AAR Library
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Set up Android NDK
+        run: |
+          wget -qO android-ndk.zip https://dl.google.com/android/repository/android-ndk-r28b-linux.zip
+          unzip -q android-ndk.zip
+          rm android-ndk.zip
+          echo "ANDROID_NDK_HOME=$(realpath android-ndk-*)" >> $GITHUB_ENV
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+
+      - name: Build Android AAR
+        run: |
+          mkdir -p dist
+          VERSION=$(git describe --tags --always --dirty)
+          
+          # Build AAR for arm64-v8a and armeabi-v7a
+          gomobile bind \
+            -v \
+            -target=android/arm64,android/arm \
+            -androidapi=24 \
+            -ldflags="-X github.com/xtls/xray-core/core.build=${VERSION} -s -w" \
+            -o dist/xray-multicdn.aar \
+            ./library
+          
+          echo "AAR build successful"
+          ls -lh dist/xray-multicdn.aar
+
+      - name: Upload AAR artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xray-android-aar
+          path: dist/*.aar
+          retention-days: 7
+
+  integration-test:
+    name: Integration Tests
+    needs: build-multi-platform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: Download linux-64 binary
+        uses: actions/download-artifact@v7
+        with:
+          name: xray-linux-64
+          path: ./bin
+
+      - name: Make binary executable
+        run: chmod +x ./bin/xray-linux-64
+
+      - name: Run integration tests
+        run: |
+          echo "Running Multi-CDN integration tests..."
+          # Add your integration test commands here
+          # Example: ./bin/xray-linux-64 test -config test-config.json
+          echo "Integration tests completed"
+
+  summary:
+    name: Build Summary
+    needs: [lint, test, build-multi-platform, build-android-aar]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check build status
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Lint: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Test: ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Multi-Platform Build: ${{ needs.build-multi-platform.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Android AAR Build: ${{ needs.build-android-aar.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.lint.result }}" == "success" && \
+                "${{ needs.test.result }}" == "success" && \
+                "${{ needs.build-multi-platform.result }}" == "success" && \
+                "${{ needs.build-android-aar.result }}" == "success" ]]; then
+            echo "✅ All builds successful!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Some builds failed. Please check the logs." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi

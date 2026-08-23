@@ -54,13 +54,27 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 		oneringCfg = tConfig.GetOneringConfig()
 	}
 
-	// Override destination if Onering is enabled
+	// Apply timing jitter for DPI evasion (Phase 2)
+	if oneringCfg != nil && oneringCfg.Enabled && oneringCfg.MultiCDNEnabled && oneringCfg.MultiCDNManager != nil {
+		if err := oneringCfg.MultiCDNManager.ApplyJitter(ctx); err != nil {
+			// Context cancelled during jitter, propagate error
+			return nil, err
+		}
+	}
+
+	// Multi-CDN retry logic
+	if oneringCfg != nil && oneringCfg.Enabled && oneringCfg.MultiCDNEnabled && oneringCfg.MultiCDNManager != nil {
+		return dialWebSocketWithMultiCDN(ctx, dest, streamSettings, ed, oneringCfg)
+	}
+
+	// Override destination if Onering is enabled (single-CDN)
 	actualDest := dest
 	if oneringCfg != nil && oneringCfg.Enabled {
 		// Dial to bug domain instead of real domain
+		bugDomain := oneringCfg.GetDialAddress()
 		actualDest = net.Destination{
 			Network: dest.Network,
-			Address: net.ParseAddress(oneringCfg.BugDomain),
+			Address: net.ParseAddress(bugDomain),
 			Port:    dest.Port,
 		}
 	}
@@ -174,6 +188,191 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 	}
 	if ed != nil {
 		// RawURLEncoding is support by both V2Ray/V2Fly and XRay.
+		header.Set("Sec-WebSocket-Protocol", base64.RawURLEncoding.EncodeToString(ed))
+	}
+
+	conn, resp, err := dialer.DialContext(ctx, uri, header)
+	if err != nil {
+		var reason string
+		if resp != nil {
+			reason = resp.Status
+		}
+		return nil, errors.New("failed to dial to (", uri, "): ", reason).Base(err)
+	}
+
+	return NewConnection(conn, conn.RemoteAddr(), nil, wsSettings.HeartbeatPeriod), nil
+}
+
+// dialWebSocketWithMultiCDN attempts WebSocket connection with multi-CDN failover
+func dialWebSocketWithMultiCDN(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig, ed []byte, oneringCfg *onering.Config) (net.Conn, error) {
+	maxRetries := 3
+	if oneringCfg.MultiCDNManager != nil {
+		// Try to get max retries from manager config
+		providers := oneringCfg.MultiCDNManager.GetProviders()
+		if len(providers) > 0 {
+			maxRetries = len(providers) * 2 // Allow 2 attempts per provider
+		}
+	}
+
+	var lastErr error
+	triedProviders := make(map[string]bool)
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Select CDN provider
+		provider := oneringCfg.MultiCDNManager.SelectCDN()
+		if provider == nil {
+			break // No available providers
+		}
+
+		// Skip if already tried this provider
+		if triedProviders[provider.Name] {
+			continue
+		}
+		triedProviders[provider.Name] = true
+
+		// Set destination to bug domain
+		actualDest := net.Destination{
+			Network: dest.Network,
+			Address: net.ParseAddress(provider.BugDomain),
+			Port:    dest.Port,
+		}
+
+		// Attempt connection with this provider
+		conn, err := dialWebSocketWithDest(ctx, dest, actualDest, streamSettings, ed, oneringCfg, provider.BugDomain)
+		if err == nil {
+			// Success - use thread-safe method - fixes BUG #5
+			if oneringCfg.MultiCDNManager != nil {
+				oneringCfg.MultiCDNManager.RecordSuccess(provider.Name, 0)
+			}
+			return conn, nil
+		}
+
+		// Failed - use thread-safe method - fixes BUG #5
+		if oneringCfg.MultiCDNManager != nil {
+			oneringCfg.MultiCDNManager.RecordFailure(provider.Name)
+		}
+		lastErr = err
+	}
+
+	// All attempts failed
+	if lastErr != nil {
+		return nil, errors.New("failed to dial WebSocket with multi-CDN after all retries").Base(lastErr)
+	}
+	return nil, errors.New("no available CDN providers")
+}
+
+// dialWebSocketWithDest performs actual WebSocket dial with specified destination
+func dialWebSocketWithDest(ctx context.Context, dest net.Destination, actualDest net.Destination, streamSettings *internet.MemoryStreamConfig, ed []byte, oneringCfg *onering.Config, bugDomain string) (net.Conn, error) {
+	wsSettings := streamSettings.ProtocolSettings.(*Config)
+	tConfig := tls.ConfigFromStreamSettings(streamSettings)
+
+	dialer := &websocket.Dialer{
+		NetDial: func(network, addr string) (net.Conn, error) {
+			conn, err := internet.DialSystem(ctx, actualDest, streamSettings.SocketSettings)
+			if err != nil {
+				return nil, err
+			}
+
+			if streamSettings.TcpmaskManager != nil {
+				newConn, err := streamSettings.TcpmaskManager.WrapConnClient(conn)
+				if err != nil {
+					conn.Close()
+					return nil, errors.New("mask err").Base(err)
+				}
+				conn = newConn
+			}
+
+			return conn, err
+		},
+		ReadBufferSize:   4 * 1024,
+		WriteBufferSize:  4 * 1024,
+		HandshakeTimeout: time.Second * 8,
+	}
+
+	protocol := "ws"
+
+	if tConfig != nil {
+		protocol = "wss"
+		tlsConfig := tConfig.GetTLSConfig(tls.WithDestination(dest), tls.WithNextProto("http/1.1"))
+		// Override ServerName with bug domain for multi-CDN
+		tlsConfig.ServerName = bugDomain
+		dialer.TLSClientConfig = tlsConfig
+		if fingerprint := tls.GetFingerprint(tConfig.Fingerprint); fingerprint != nil {
+			dialer.NetDialTLSContext = func(_ context.Context, _, addr string) (net.Conn, error) {
+				pconn, err := internet.DialSystem(ctx, actualDest, streamSettings.SocketSettings)
+				if err != nil {
+					errors.LogErrorInner(ctx, err, "failed to dial to "+addr)
+					return nil, err
+				}
+
+				if streamSettings.TcpmaskManager != nil {
+					newConn, err := streamSettings.TcpmaskManager.WrapConnClient(pconn)
+					if err != nil {
+						pconn.Close()
+						return nil, errors.New("mask err").Base(err)
+					}
+					pconn = newConn
+				}
+
+				// TLS and apply the handshake
+				cn := tls.UClient(pconn, tlsConfig, fingerprint).(*tls.UConn)
+				if err := cn.WebsocketHandshakeContext(ctx); err != nil {
+					errors.LogErrorInner(ctx, err, "failed to dial to "+addr)
+					return nil, err
+				}
+				if !tlsConfig.InsecureSkipVerify {
+					if err := cn.VerifyHostname(tlsConfig.ServerName); err != nil {
+						errors.LogErrorInner(ctx, err, "failed to dial to "+addr)
+						return nil, err
+					}
+				}
+				return cn, nil
+			}
+		}
+	}
+
+	if browser_dialer.HasBrowserDialer() {
+		host := wsSettings.Host
+		if host == "" && tConfig.ServerName != "" {
+			host = tConfig.ServerName
+		}
+		if host == "" {
+			host = actualDest.Address.String()
+		}
+		if !(protocol == "ws" && actualDest.Port == 80) && !(protocol == "wss" && actualDest.Port == 443) {
+			host += ":" + actualDest.Port.String()
+		}
+		uri := protocol + "://" + host + wsSettings.GetNormalizedPath()
+
+		conn, err := browser_dialer.DialWS(uri, ed)
+		if err != nil {
+			return nil, err
+		}
+
+		return NewConnection(conn, conn.RemoteAddr(), nil, wsSettings.HeartbeatPeriod), nil
+	}
+
+	host := actualDest.Address.String()
+	if !(protocol == "ws" && actualDest.Port == 80) && !(protocol == "wss" && actualDest.Port == 443) {
+		host += ":" + actualDest.Port.String()
+	}
+	uri := protocol + "://" + host + wsSettings.GetNormalizedPath()
+
+	header := wsSettings.GetRequestHeader()
+	
+	// Set Host header - use real domain if Onering is enabled
+	if oneringCfg != nil && oneringCfg.Enabled {
+		header.Set("Host", oneringCfg.RealDomain)
+	} else {
+		header.Set("Host", wsSettings.Host)
+		if header.Get("Host") == "" && tConfig != nil {
+			header.Set("Host", tConfig.ServerName)
+		}
+		if header.Get("Host") == "" {
+			header.Set("Host", dest.Address.String())
+		}
+	}
+	if ed != nil {
 		header.Set("Sec-WebSocket-Protocol", base64.RawURLEncoding.EncodeToString(ed))
 	}
 

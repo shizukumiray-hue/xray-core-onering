@@ -1,0 +1,96 @@
+{
+  "log": {
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "your-server.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "your-uuid-here",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "onering-multi:your-server.com",
+          "fingerprint": "chrome",
+          "multiCDN": {
+            "enabled": true,
+            "strategy": "health-based",
+            "providers": [
+              {
+                "name": "cloudflare",
+                "bugDomain": "zoom.us",
+                "priority": 100,
+                "isps": ["telkomsel"]
+              },
+              {
+                "name": "cloudflare-backup",
+                "bugDomain": "teams.microsoft.com",
+                "priority": 90,
+                "isps": ["telkomsel"]
+              },
+              {
+                "name": "akamai",
+                "bugDomain": "facebook.com",
+                "priority": 80,
+                "isps": ["telkomsel"]
+              }
+            ],
+            "healthCheck": {
+              "enabled": true,
+              "interval": "30s",
+              "timeout": "5s"
+            },
+            "failover": {
+              "maxRetries": 3,
+              "blacklistDuration": "5m",
+              "fallbackToSingle": true
+            },
+            "evasion": {
+              "enableRotation": true,
+              "rotateInterval": "3m",
+              "enableJitter": true,
+              "jitterMin": "100ms",
+              "jitterMax": "300ms",
+              "enablePadding": true,
+              "maxPaddingSize": 512,
+              "randomizeTLS": true
+            }
+          }
+        },
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "your-server.com"
+          }
+        }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": 8
+      }
+    }
+  ]
+}

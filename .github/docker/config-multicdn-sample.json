@@ -1,0 +1,139 @@
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "/var/log/xray/access.log",
+    "error": "/var/log/xray/error.log"
+  },
+  "inbounds": [
+    {
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true,
+        "ip": "0.0.0.0"
+      },
+      "tag": "socks-in"
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "your-server.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "your-uuid-here",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "onering-multi:your-server.com",
+          "fingerprint": "chrome",
+          "alpn": ["h2", "http/1.1"],
+          "multiCDN": {
+            "enabled": true,
+            "strategy": "health-based",
+            "providers": [
+              {
+                "name": "cloudflare",
+                "bugDomain": "zoom.us",
+                "priority": 100,
+                "isps": ["telkomsel", "indosat"]
+              },
+              {
+                "name": "cloudfront",
+                "bugDomain": "teams.microsoft.com",
+                "priority": 90,
+                "isps": ["xl"]
+              },
+              {
+                "name": "fastly",
+                "bugDomain": "wa.me",
+                "priority": 80,
+                "isps": ["indosat"]
+              },
+              {
+                "name": "akamai",
+                "bugDomain": "facebook.com",
+                "priority": 70,
+                "isps": []
+              }
+            ],
+            "healthCheck": {
+              "enabled": true,
+              "interval": "30s",
+              "timeout": "5s",
+              "url": "https://cloudflare.com/cdn-cgi/trace"
+            },
+            "failover": {
+              "maxRetries": 3,
+              "blacklistDuration": "5m",
+              "fallbackToSingle": true
+            },
+            "evasion": {
+              "enableRotation": true,
+              "rotateInterval": "5m",
+              "enableJitter": true,
+              "jitterMaxMs": 50,
+              "enablePadding": true,
+              "paddingMaxSize": 128,
+              "randomizeFingerprint": true
+            },
+            "ispDetection": {
+              "enabled": true,
+              "method": "plmn",
+              "fallback": "latency"
+            }
+          }
+        },
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "your-server.com"
+          }
+        }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": 8
+      },
+      "tag": "proxy"
+    },
+    {
+      "protocol": "freedom",
+      "settings": {},
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "domain": ["geosite:category-ads-all"],
+        "outboundTag": "block"
+      }
+    ]
+  }
+}

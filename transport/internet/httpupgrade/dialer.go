@@ -10,6 +10,7 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/onering"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/stat"
@@ -44,9 +45,48 @@ func (c *ConnRF) Read(b []byte) (int, error) {
 }
 
 func dialhttpUpgrade(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (net.Conn, error) {
-	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
+	tConfig := tls.ConfigFromStreamSettings(streamSettings)
 
-	pconn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
+	// Get Onering config from TLS settings if available
+	var oneringCfg *onering.Config
+	if tConfig != nil {
+		oneringCfg = tConfig.GetOneringConfig()
+	}
+
+	// Apply timing jitter for DPI evasion (Phase 2)
+	if oneringCfg != nil && oneringCfg.Enabled && oneringCfg.MultiCDNEnabled && oneringCfg.MultiCDNManager != nil {
+		if err := oneringCfg.MultiCDNManager.ApplyJitter(ctx); err != nil {
+			// Context cancelled during jitter, propagate error
+			return nil, err
+		}
+	}
+
+	// Multi-CDN retry logic
+	if oneringCfg != nil && oneringCfg.Enabled && oneringCfg.MultiCDNEnabled && oneringCfg.MultiCDNManager != nil {
+		return dialhttpUpgradeWithMultiCDN(ctx, dest, streamSettings, oneringCfg)
+	}
+
+	// Single-CDN or no onering
+	return dialhttpUpgradeSingle(ctx, dest, streamSettings, oneringCfg)
+}
+
+// dialhttpUpgradeSingle performs a single HTTP upgrade connection
+func dialhttpUpgradeSingle(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig, oneringCfg *onering.Config) (net.Conn, error) {
+	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
+	tConfig := tls.ConfigFromStreamSettings(streamSettings)
+
+	// Override destination if Onering is enabled
+	actualDest := dest
+	if oneringCfg != nil && oneringCfg.Enabled {
+		bugDomain := oneringCfg.GetDialAddress()
+		actualDest = net.Destination{
+			Network: dest.Network,
+			Address: net.ParseAddress(bugDomain),
+			Port:    dest.Port,
+		}
+	}
+
+	pconn, err := internet.DialSystem(ctx, actualDest, streamSettings.SocketSettings)
 	if err != nil {
 		errors.LogErrorInner(ctx, err, "failed to dial to ", dest)
 		return nil, err
@@ -63,9 +103,12 @@ func dialhttpUpgrade(ctx context.Context, dest net.Destination, streamSettings *
 
 	var conn net.Conn
 	var requestURL url.URL
-	tConfig := tls.ConfigFromStreamSettings(streamSettings)
 	if tConfig != nil {
 		tlsConfig := tConfig.GetTLSConfig(tls.WithDestination(dest), tls.WithNextProto("http/1.1"))
+		// Override ServerName with bug domain if Onering is enabled
+		if oneringCfg != nil && oneringCfg.Enabled {
+			tlsConfig.ServerName = oneringCfg.GetTLSSNI()
+		}
 		if fingerprint := tls.GetFingerprint(tConfig.Fingerprint); fingerprint != nil {
 			conn = tls.UClient(pconn, tlsConfig, fingerprint)
 			if err := conn.(*tls.UConn).WebsocketHandshakeContext(ctx); err != nil {
@@ -81,7 +124,9 @@ func dialhttpUpgrade(ctx context.Context, dest net.Destination, streamSettings *
 	}
 
 	requestURL.Host = transportConfiguration.Host
-	if requestURL.Host == "" && tConfig != nil {
+	if requestURL.Host == "" && oneringCfg != nil && oneringCfg.Enabled {
+		requestURL.Host = oneringCfg.RealDomain
+	} else if requestURL.Host == "" && tConfig != nil {
 		requestURL.Host = tConfig.ServerName
 	}
 	if requestURL.Host == "" {
@@ -119,6 +164,60 @@ func dialhttpUpgrade(ctx context.Context, dest net.Destination, streamSettings *
 	}
 
 	return connRF, nil
+}
+
+// dialhttpUpgradeWithMultiCDN attempts HTTP upgrade with multi-CDN failover
+func dialhttpUpgradeWithMultiCDN(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig, oneringCfg *onering.Config) (net.Conn, error) {
+	maxRetries := 3
+	if oneringCfg.MultiCDNManager != nil {
+		providers := oneringCfg.MultiCDNManager.GetProviders()
+		if len(providers) > 0 {
+			maxRetries = len(providers) * 2
+		}
+	}
+
+	var lastErr error
+	triedProviders := make(map[string]bool)
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		provider := oneringCfg.MultiCDNManager.SelectCDN()
+		if provider == nil {
+			break
+		}
+
+		if triedProviders[provider.Name] {
+			continue
+		}
+		triedProviders[provider.Name] = true
+
+		// Create modified config with this provider's bug domain
+		modifiedCfg := &onering.Config{
+			Enabled:         true,
+			RealDomain:      oneringCfg.RealDomain,
+			BugDomain:       provider.BugDomain,
+			MultiCDNEnabled: false, // Treat as single-CDN for this attempt
+		}
+
+		conn, err := dialhttpUpgradeSingle(ctx, dest, streamSettings, modifiedCfg)
+		if err == nil {
+			// Success - use thread-safe method - fixes BUG #5
+			if oneringCfg.MultiCDNManager != nil {
+				oneringCfg.MultiCDNManager.RecordSuccess(provider.Name, 0)
+			}
+			return conn, nil
+		}
+
+		// Failed - use thread-safe method - fixes BUG #5
+		if oneringCfg.MultiCDNManager != nil {
+			oneringCfg.MultiCDNManager.RecordFailure(provider.Name)
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		return nil, errors.New("failed to dial HTTP upgrade with multi-CDN after all retries").Base(lastErr)
+	}
+	return nil, errors.New("no available CDN providers")
 }
 
 // http.Header.Add() will convert headers to MIME header format.

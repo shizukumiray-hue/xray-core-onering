@@ -1,0 +1,42 @@
+{
+  "outbounds": [{
+    "protocol": "vmess",
+    "settings": {
+      "vnext": [{
+        "address": "your-server.com",
+        "port": 443,
+        "users": [{
+          "id": "your-uuid-here"
+        }]
+      }]
+    },
+    "streamSettings": {
+      "network": "ws",
+      "security": "tls",
+      "tlsSettings": {
+        "serverName": "onering-multi:your-server.com",
+        
+        "multiCDN": {
+          "enabled": true,
+          "strategy": "roundrobin",
+          
+          "providers": [
+            {
+              "name": "cloudflare",
+              "bugDomain": "zoom.us",
+              "priority": 100
+            },
+            {
+              "name": "cloudfront",
+              "bugDomain": "aws.amazon.com",
+              "priority": 90
+            }
+          ]
+        }
+      },
+      "wsSettings": {
+        "path": "/"
+      }
+    }
+  }]
+}

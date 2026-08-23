@@ -2,21 +2,36 @@ package onering
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 )
 
 // Prefix for onering format
-const Prefix = "onering:"
+const (
+	Prefix          = "onering:"
+	MultiCDNPrefix  = "onering-multi:"
+)
 
 // Config holds parsed onering configuration
 type Config struct {
 	Enabled    bool
 	RealDomain string
 	BugDomain  string
+	
+	// Multi-CDN support
+	MultiCDNEnabled bool
+	MultiCDNManager *MultiCDNManager
+	
+	// Provider selection cache - fixes BUG #3
+	selectedProvider *CDNProvider
+	selectionMutex   sync.RWMutex
 }
 
 // Parse parses onering format string
-// Format: "onering:real.domain.com:bug.domain.com"
+// Formats:
+//   - Single CDN: "onering:real.domain.com:bug.domain.com"
+//   - Multi-CDN: "onering-multi:real.domain.com"
 // Returns Config or error if invalid format
 func Parse(input string) (*Config, error) {
 	// Empty input = disabled
@@ -24,15 +39,26 @@ func Parse(input string) (*Config, error) {
 		return &Config{Enabled: false}, nil
 	}
 
-	// Not onering format = disabled (backward compatible)
-	if !strings.HasPrefix(input, Prefix) {
-		return &Config{
-			Enabled:    false,
-			RealDomain: input,
-			BugDomain:  "",
-		}, nil
+	// Check for multi-CDN format first
+	if strings.HasPrefix(input, MultiCDNPrefix) {
+		return parseMultiCDN(input)
 	}
 
+	// Check for single-CDN format
+	if strings.HasPrefix(input, Prefix) {
+		return parseSingleCDN(input)
+	}
+
+	// Not onering format = disabled (backward compatible)
+	return &Config{
+		Enabled:    false,
+		RealDomain: input,
+		BugDomain:  "",
+	}, nil
+}
+
+// parseSingleCDN parses single-CDN format: "onering:real:bug"
+func parseSingleCDN(input string) (*Config, error) {
 	// Remove prefix
 	trimmed := strings.TrimPrefix(input, Prefix)
 
@@ -60,9 +86,37 @@ func Parse(input string) (*Config, error) {
 	}
 
 	return &Config{
-		Enabled:    true,
-		RealDomain: real,
-		BugDomain:  bug,
+		Enabled:         true,
+		RealDomain:      real,
+		BugDomain:       bug,
+		MultiCDNEnabled: false,
+	}, nil
+}
+
+// parseMultiCDN parses multi-CDN format: "onering-multi:real"
+func parseMultiCDN(input string) (*Config, error) {
+	// Remove prefix
+	trimmed := strings.TrimPrefix(input, MultiCDNPrefix)
+
+	// Check for invalid chars
+	if containsInvalidChars(trimmed) {
+		return nil, errors.New("domain contains invalid characters")
+	}
+
+	// Trim spaces
+	real := strings.TrimSpace(trimmed)
+
+	// Validation
+	if real == "" {
+		return nil, errors.New("real domain cannot be empty")
+	}
+
+	return &Config{
+		Enabled:         true,
+		RealDomain:      real,
+		BugDomain:       "", // Will be selected by MultiCDNManager
+		MultiCDNEnabled: true,
+		MultiCDNManager: nil, // Will be set later by TLS config
 	}, nil
 }
 
@@ -78,10 +132,31 @@ func containsInvalidChars(domain string) bool {
 	return strings.ContainsAny(domain, "\r\n\t\"'<>")
 }
 
+// selectProviderOnce selects and caches provider for this connection - fixes BUG #3
+func (c *Config) selectProviderOnce() *CDNProvider {
+	c.selectionMutex.Lock()
+	defer c.selectionMutex.Unlock()
+	
+	if c.selectedProvider == nil && c.MultiCDNManager != nil {
+		c.selectedProvider = c.MultiCDNManager.SelectCDN()
+	}
+	return c.selectedProvider
+}
+
 // GetDialAddress returns the address to dial (bug domain if enabled)
 func (c *Config) GetDialAddress() string {
 	if c.Enabled {
-		return c.BugDomain
+		// Multi-CDN: select once and cache - fixes BUG #3
+		if c.MultiCDNEnabled && c.MultiCDNManager != nil {
+			provider := c.selectProviderOnce()
+			if provider != nil {
+				return provider.BugDomain
+			}
+		}
+		// Single-CDN or fallback
+		if c.BugDomain != "" {
+			return c.BugDomain
+		}
 	}
 	return c.RealDomain
 }
@@ -89,7 +164,17 @@ func (c *Config) GetDialAddress() string {
 // GetTLSSNI returns SNI for TLS handshake
 func (c *Config) GetTLSSNI() string {
 	if c.Enabled {
-		return c.BugDomain
+		// Multi-CDN: use cached provider - fixes BUG #3
+		if c.MultiCDNEnabled && c.MultiCDNManager != nil {
+			provider := c.selectProviderOnce()
+			if provider != nil {
+				return provider.BugDomain
+			}
+		}
+		// Single-CDN or fallback
+		if c.BugDomain != "" {
+			return c.BugDomain
+		}
 	}
 	return c.RealDomain
 }
@@ -104,5 +189,18 @@ func (c *Config) String() string {
 	if !c.Enabled {
 		return "onering:disabled"
 	}
+	if c.MultiCDNEnabled {
+		availableCount := 0
+		if c.MultiCDNManager != nil {
+			availableCount = c.MultiCDNManager.GetAvailableCount()
+		}
+		// Fixed string conversion bug - fixes BUG #4
+		return fmt.Sprintf("onering:multi-cdn(real=%s,providers=%d)", c.RealDomain, availableCount)
+	}
 	return "onering:enabled(real=" + c.RealDomain + ",bug=" + c.BugDomain + ")"
+}
+
+// SetMultiCDNManager sets the multi-CDN manager for this config
+func (c *Config) SetMultiCDNManager(manager *MultiCDNManager) {
+	c.MultiCDNManager = manager
 }

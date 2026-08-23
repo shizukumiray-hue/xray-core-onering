@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  xray-multicdn:
+    image: ghcr.io/${GITHUB_REPOSITORY}:latest
+    container_name: xray-onering-multicdn
+    restart: unless-stopped
+    
+    # Network configuration
+    network_mode: bridge
+    ports:
+      - "10808:10808"  # SOCKS5 proxy port
+      - "10809:10809"  # HTTP proxy port (if configured)
+    
+    # Volume mounts
+    volumes:
+      - ./config.json:/etc/xray/config.json:ro
+      - ./logs:/var/log/xray
+      - xray-data:/var/lib/xray
+    
+    # Environment variables
+    environment:
+      - TZ=Asia/Jakarta
+      - XRAY_LOCATION_ASSET=/usr/local/share/xray
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 128M
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "xray", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp
+
+volumes:
+  xray-data:
+    driver: local
+
+networks:
+  default:
+    driver: bridge

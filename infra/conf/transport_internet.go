@@ -16,6 +16,7 @@ import (
 
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/onering"
 	"github.com/xtls/xray-core/common/platform/filesystem"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/transport/internet"
@@ -664,6 +665,186 @@ type TLSConfig struct {
 	ECHConfigList           string           `json:"echConfigList"`
 	ECHForceQuery           string           `json:"echForceQuery"`
 	ECHSocketSettings       *SocketConfig    `json:"echSockopt"`
+	MultiCDN                *MultiCDNConfig  `json:"multiCDN"`
+}
+
+// MultiCDNConfig represents multi-CDN configuration in JSON
+type MultiCDNConfig struct {
+	Enabled     bool                 `json:"enabled"`
+	Strategy    string               `json:"strategy"`
+	Providers   []*CDNProviderConfig `json:"providers"`
+	HealthCheck *HealthCheckConfig   `json:"healthCheck"`
+	Failover    *FailoverConfig      `json:"failover"`
+	Evasion     *EvasionConfig       `json:"evasion"`
+}
+
+// CDNProviderConfig represents a CDN provider in JSON
+type CDNProviderConfig struct {
+	Name      string   `json:"name"`
+	BugDomain string   `json:"bugDomain"`
+	Priority  int      `json:"priority"`
+	ISPs      []string `json:"isps"`
+}
+
+// HealthCheckConfig represents health check configuration in JSON
+type HealthCheckConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Interval string `json:"interval"`
+	Timeout  string `json:"timeout"`
+	URL      string `json:"url"`
+}
+
+// FailoverConfig represents failover configuration in JSON
+type FailoverConfig struct {
+	MaxRetries        int    `json:"maxRetries"`
+	BlacklistDuration string `json:"blacklistDuration"`
+	FallbackToSingle  bool   `json:"fallbackToSingle"`
+}
+
+// EvasionConfig represents evasion configuration in JSON
+type EvasionConfig struct {
+	EnableRotation       bool   `json:"enableRotation"`
+	RotateInterval       string `json:"rotateInterval"`
+	EnableJitter         bool   `json:"enableJitter"`
+	JitterMin            string `json:"jitterMin"`
+	JitterMax            string `json:"jitterMax"`
+	EnablePadding        bool   `json:"enablePadding"`
+	MaxPaddingSize       int    `json:"maxPaddingSize"`
+	RandomizeTLS         bool   `json:"randomizeTLS"`
+}
+
+// Multi-CDN validation constants
+const (
+	// Provider limits
+	MaxProviders          = 50
+	MaxProviderNameLength = 64
+	MaxBugDomainLength    = 253 // DNS max domain length
+	MaxISPsPerProvider    = 20
+	MaxISPNameLength      = 64
+
+	// Priority limits (per PRD)
+	MinPriority     = 1
+	MaxPriority     = 100
+	DefaultPriority = 50
+
+	// Duration limits
+	MinHealthCheckInterval = 5 * time.Second
+	MaxHealthCheckInterval = 1 * time.Hour
+	MinHealthCheckTimeout  = 1 * time.Second
+	MaxHealthCheckTimeout  = 30 * time.Second
+	MinBlacklistDuration   = 10 * time.Second
+	MaxBlacklistDuration   = 1 * time.Hour
+	MinRotateInterval      = 1 * time.Minute
+	MaxRotateInterval      = 24 * time.Hour
+	MinJitterDuration      = 10 * time.Millisecond
+	MaxJitterDuration      = 5 * time.Second
+
+	// Evasion limits
+	MaxPaddingSize = 2048
+
+	// Failover limits
+	MaxFailoverRetries = 10
+
+	// URL limits
+	MaxHealthCheckURLLength = 2048
+
+	// Strategy name limit
+	MaxStrategyLength = 32
+)
+
+// validateDuration validates a duration string and ensures it's within bounds
+func validateDuration(durationStr string, min, max time.Duration, fieldName string) (time.Duration, error) {
+	if durationStr == "" {
+		return 0, nil // Allow empty, will use default
+	}
+
+	duration, err := time.ParseDuration(durationStr)
+	if err != nil {
+		return 0, errors.New("invalid ", fieldName, ": ", durationStr).Base(err)
+	}
+
+	if duration <= 0 {
+		return 0, errors.New(fieldName, " must be positive, got: ", durationStr)
+	}
+
+	if duration < min {
+		return 0, errors.New(fieldName, " too short: minimum ", min, ", got: ", durationStr)
+	}
+
+	if duration > max {
+		return 0, errors.New(fieldName, " too long: maximum ", max, ", got: ", durationStr)
+	}
+
+	return duration, nil
+}
+
+// isValidDomainName performs basic DNS domain validation
+func isValidDomainName(domain string) bool {
+	if len(domain) == 0 || len(domain) > MaxBugDomainLength {
+		return false
+	}
+
+	// Check for invalid characters
+	for _, r := range domain {
+		if !((r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '-') {
+			return false
+		}
+	}
+
+	// Domain shouldn't start or end with hyphen or dot
+	if domain[0] == '-' || domain[0] == '.' ||
+		domain[len(domain)-1] == '-' || domain[len(domain)-1] == '.' {
+		return false
+	}
+
+	return true
+}
+
+// validateHealthCheckURL validates the health check URL
+func validateHealthCheckURL(urlStr string) error {
+	if urlStr == "" {
+		return nil // Empty is OK, health check will use TLS dial
+	}
+
+	if len(urlStr) > MaxHealthCheckURLLength {
+		return errors.New("healthCheck URL too long (max ", MaxHealthCheckURLLength, " chars)")
+	}
+
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return errors.New("invalid healthCheck URL").Base(err)
+	}
+
+	// Only allow HTTP/HTTPS
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("healthCheck URL must use http or https scheme, got: ", u.Scheme)
+	}
+
+	// Extract host (handle host:port format)
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("healthCheck URL missing host")
+	}
+
+	// Block private/loopback IPs to prevent SSRF
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() {
+			return errors.New("healthCheck URL cannot target loopback address")
+		}
+		if ip.IsPrivate() {
+			return errors.New("healthCheck URL cannot target private IP")
+		}
+		// Block link-local, multicast, unspecified
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsMulticast() || ip.IsUnspecified() {
+			return errors.New("healthCheck URL target is not a valid public address")
+		}
+	}
+
+	return nil
 }
 
 // Build implements Buildable.
@@ -768,7 +949,313 @@ func (c *TLSConfig) Build() (proto.Message, error) {
 		config.EchSocketSettings = ss
 	}
 
+	// Build multi-CDN config if provided
+	if c.MultiCDN != nil && c.MultiCDN.Enabled {
+		// Validate providers exist
+		if len(c.MultiCDN.Providers) == 0 {
+			return nil, errors.New("multiCDN enabled but no providers configured")
+		}
+
+		// Parse and validate the configuration
+		multiCDNConfig, err := c.buildMultiCDNConfig()
+		if err != nil {
+			return nil, errors.New("failed to build multi-CDN config").Base(err)
+		}
+
+		// Create MultiCDNManager
+		manager := onering.NewMultiCDNManager(multiCDNConfig)
+		if manager == nil {
+			return nil, errors.New("failed to create multi-CDN manager")
+		}
+
+		// Attach manager to onering.Config if ServerName is onering-multi format
+		if strings.HasPrefix(serverName, onering.MultiCDNPrefix) {
+			oneringCfg, err := onering.Parse(serverName)
+			if err != nil {
+				return nil, errors.New("failed to parse onering-multi ServerName").Base(err)
+			}
+			oneringCfg.SetMultiCDNManager(manager)
+			
+			// Store the manager in a way that can be retrieved during connection
+			// We'll use the ServerName field to carry the onering config
+			// The actual TLS SNI will be determined during connection based on selected CDN
+			config.ServerName = serverName
+		}
+	}
+
 	return config, nil
+}
+
+// buildMultiCDNConfig constructs onering.MultiCDNConfig from JSON config
+func (c *TLSConfig) buildMultiCDNConfig() (*onering.MultiCDNConfig, error) {
+	if c.MultiCDN == nil {
+		return nil, errors.New("multiCDN config is nil")
+	}
+
+	// Validate providers exist
+	if len(c.MultiCDN.Providers) == 0 {
+		return nil, errors.New("at least one provider is required")
+	}
+
+	// H1: Limit number of providers to prevent resource exhaustion
+	if len(c.MultiCDN.Providers) > MaxProviders {
+		return nil, errors.New("too many providers: maximum ", MaxProviders, " allowed, got ", len(c.MultiCDN.Providers))
+	}
+
+	// Parse and validate strategy
+	strategy := strings.ToLower(strings.TrimSpace(c.MultiCDN.Strategy))
+	if strategy == "" {
+		strategy = "roundrobin" // Default strategy
+	}
+
+	// M2: Validate strategy name length
+	if len(strategy) > MaxStrategyLength {
+		return nil, errors.New("strategy name too long (max ", MaxStrategyLength, " chars)")
+	}
+
+	// Validate strategy
+	validStrategies := map[string]bool{
+		"roundrobin": true, "round-robin": true,
+		"failover":      true,
+		"latency":       true, "latency-based": true,
+		"health":        true, "health-based": true,
+		"random":        true,
+	}
+	if !validStrategies[strategy] {
+		return nil, errors.New("invalid strategy: must be one of: roundrobin, failover, latency, health, random")
+	}
+
+	// Build CDN providers with validation
+	providers := make([]*onering.CDNProvider, 0, len(c.MultiCDN.Providers))
+	seenNames := make(map[string]bool)
+
+	for i, p := range c.MultiCDN.Providers {
+		// M1: Validate provider name
+		if p.Name == "" {
+			return nil, errors.New("provider at index ", i, " has empty name")
+		}
+		if len(p.Name) > MaxProviderNameLength {
+			return nil, errors.New("provider at index ", i, " name too long (max ", MaxProviderNameLength, " chars)")
+		}
+
+		// L2: Check for duplicate provider names
+		if seenNames[p.Name] {
+			return nil, errors.New("duplicate provider name: ", p.Name)
+		}
+		seenNames[p.Name] = true
+
+		// M3: Validate bug domain
+		if p.BugDomain == "" {
+			return nil, errors.New("provider '", p.Name, "' has empty bugDomain")
+		}
+		if len(p.BugDomain) > MaxBugDomainLength {
+			return nil, errors.New("provider '", p.Name, "' bugDomain too long (max ", MaxBugDomainLength, " chars)")
+		}
+		if !isValidDomainName(p.BugDomain) {
+			return nil, errors.New("provider '", p.Name, "' has invalid bugDomain: ", p.BugDomain)
+		}
+
+		// L1: Validate priority range
+		priority := p.Priority
+		if priority == 0 {
+			priority = DefaultPriority
+		} else {
+			if priority < MinPriority || priority > MaxPriority {
+				return nil, errors.New("provider '", p.Name, "' priority must be between ", MinPriority, " and ", MaxPriority, ", got ", priority)
+			}
+		}
+
+		// M4: Validate ISPs array
+		if len(p.ISPs) > MaxISPsPerProvider {
+			return nil, errors.New("provider '", p.Name, "' has too many ISPs (max ", MaxISPsPerProvider, ")")
+		}
+		for _, isp := range p.ISPs {
+			if len(isp) > MaxISPNameLength {
+				return nil, errors.New("provider '", p.Name, "' has ISP name too long (max ", MaxISPNameLength, " chars)")
+			}
+		}
+
+		// Validate priority for failover strategy
+		if strategy == "failover" && p.Priority == 0 {
+			return nil, errors.New("provider '", p.Name, "' requires priority for failover strategy")
+		}
+
+		provider := &onering.CDNProvider{
+			Name:       p.Name,
+			BugDomain:  p.BugDomain,
+			Priority:   priority,
+			ISPs:       p.ISPs,
+			Healthy:    true, // Initial state
+			FailCount:  0,
+			AvgLatency: 0,
+		}
+		providers = append(providers, provider)
+	}
+
+	// Parse health check config with validation
+	healthCheckConfig := onering.HealthCheckConfig{
+		Enabled:  true, // Default enabled
+		Interval: 30 * time.Second,
+		Timeout:  5 * time.Second,
+	}
+
+	if c.MultiCDN.HealthCheck != nil {
+		healthCheckConfig.Enabled = c.MultiCDN.HealthCheck.Enabled
+
+		// H2/H3: Validate interval
+		if c.MultiCDN.HealthCheck.Interval != "" {
+			interval, err := validateDuration(
+				c.MultiCDN.HealthCheck.Interval,
+				MinHealthCheckInterval,
+				MaxHealthCheckInterval,
+				"healthCheck interval",
+			)
+			if err != nil {
+				return nil, err
+			}
+			healthCheckConfig.Interval = interval
+		}
+
+		// H2/H3: Validate timeout
+		if c.MultiCDN.HealthCheck.Timeout != "" {
+			timeout, err := validateDuration(
+				c.MultiCDN.HealthCheck.Timeout,
+				MinHealthCheckTimeout,
+				MaxHealthCheckTimeout,
+				"healthCheck timeout",
+			)
+			if err != nil {
+				return nil, err
+			}
+			healthCheckConfig.Timeout = timeout
+		}
+
+		// M5: Validate health check URL
+		if err := validateHealthCheckURL(c.MultiCDN.HealthCheck.URL); err != nil {
+			return nil, err
+		}
+		healthCheckConfig.URL = c.MultiCDN.HealthCheck.URL
+	}
+
+	// Parse failover config with validation
+	failoverConfig := onering.FailoverConfig{
+		MaxRetries:        3,
+		BlacklistDuration: 5 * time.Minute,
+		FallbackToSingle:  true,
+	}
+
+	if c.MultiCDN.Failover != nil {
+		// H4: Validate maxRetries
+		if c.MultiCDN.Failover.MaxRetries > 0 {
+			if c.MultiCDN.Failover.MaxRetries > MaxFailoverRetries {
+				return nil, errors.New("maxRetries exceeds limit of ", MaxFailoverRetries, ", got ", c.MultiCDN.Failover.MaxRetries)
+			}
+			failoverConfig.MaxRetries = c.MultiCDN.Failover.MaxRetries
+		}
+
+		// H2/H3: Validate blacklist duration
+		if c.MultiCDN.Failover.BlacklistDuration != "" {
+			duration, err := validateDuration(
+				c.MultiCDN.Failover.BlacklistDuration,
+				MinBlacklistDuration,
+				MaxBlacklistDuration,
+				"failover blacklistDuration",
+			)
+			if err != nil {
+				return nil, err
+			}
+			failoverConfig.BlacklistDuration = duration
+		}
+
+		failoverConfig.FallbackToSingle = c.MultiCDN.Failover.FallbackToSingle
+	}
+
+	// Parse evasion config (Phase 2 - full support)
+	evasionConfig := onering.EvasionConfig{
+		JitterEnabled:  false,
+		JitterMin:      50 * time.Millisecond,
+		JitterMax:      200 * time.Millisecond,
+		PaddingEnabled: false,
+		MaxPaddingSize: 512,
+		RotateEnabled:  false,
+		RotateInterval: 5 * time.Minute,
+		RandomizeTLS:   false,
+	}
+
+	if c.MultiCDN.Evasion != nil {
+		evasionConfig.RotateEnabled = c.MultiCDN.Evasion.EnableRotation
+		evasionConfig.JitterEnabled = c.MultiCDN.Evasion.EnableJitter
+		evasionConfig.PaddingEnabled = c.MultiCDN.Evasion.EnablePadding
+		evasionConfig.RandomizeTLS = c.MultiCDN.Evasion.RandomizeTLS
+
+		// Validate rotate interval
+		if c.MultiCDN.Evasion.RotateInterval != "" {
+			interval, err := validateDuration(
+				c.MultiCDN.Evasion.RotateInterval,
+				MinRotateInterval,
+				MaxRotateInterval,
+				"evasion rotateInterval",
+			)
+			if err != nil {
+				return nil, err
+			}
+			evasionConfig.RotateInterval = interval
+		}
+
+		// Validate jitter min
+		if c.MultiCDN.Evasion.JitterMin != "" {
+			jitterMin, err := validateDuration(
+				c.MultiCDN.Evasion.JitterMin,
+				MinJitterDuration,
+				MaxJitterDuration,
+				"evasion jitterMin",
+			)
+			if err != nil {
+				return nil, err
+			}
+			evasionConfig.JitterMin = jitterMin
+		}
+
+		// Validate jitter max
+		if c.MultiCDN.Evasion.JitterMax != "" {
+			jitterMax, err := validateDuration(
+				c.MultiCDN.Evasion.JitterMax,
+				MinJitterDuration,
+				MaxJitterDuration,
+				"evasion jitterMax",
+			)
+			if err != nil {
+				return nil, err
+			}
+			evasionConfig.JitterMax = jitterMax
+		}
+
+		// Ensure jitterMax >= jitterMin
+		if evasionConfig.JitterMax < evasionConfig.JitterMin {
+			return nil, errors.New("evasion jitterMax (", evasionConfig.JitterMax, ") must be >= jitterMin (", evasionConfig.JitterMin, ")")
+		}
+
+		// Validate padding size
+		if c.MultiCDN.Evasion.MaxPaddingSize > 0 {
+			if c.MultiCDN.Evasion.MaxPaddingSize > MaxPaddingSize {
+				return nil, errors.New("evasion maxPaddingSize exceeds limit of ", MaxPaddingSize, ", got ", c.MultiCDN.Evasion.MaxPaddingSize)
+			}
+			evasionConfig.MaxPaddingSize = c.MultiCDN.Evasion.MaxPaddingSize
+		}
+	}
+
+	// Create strategy instance
+	strategyType := onering.ParseStrategyType(strategy)
+	strategyInstance := onering.NewStrategy(strategyType)
+
+	return &onering.MultiCDNConfig{
+		Enabled:     true,
+		Providers:   providers,
+		Strategy:    strategyInstance,
+		HealthCheck: healthCheckConfig,
+		Failover:    failoverConfig,
+		Evasion:     evasionConfig,
+	}, nil
 }
 
 type LimitFallback struct {

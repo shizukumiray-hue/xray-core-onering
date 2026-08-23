@@ -1,0 +1,52 @@
+{
+  "log": {
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "your-server.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "your-uuid-here",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "onering:your-server.com:zoom.us",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "your-server.com"
+          }
+        }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": 8
+      }
+    }
+  ]
+}

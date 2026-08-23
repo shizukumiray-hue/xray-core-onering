@@ -1,0 +1,86 @@
+{
+  "log": {
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "your-server.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "your-uuid-here",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "onering-multi:your-server.com",
+          "fingerprint": "chrome",
+          "multiCDN": {
+            "enabled": true,
+            "strategy": "health-based",
+            "providers": [
+              {
+                "name": "cloudflare",
+                "bugDomain": "zoom.us",
+                "priority": 100,
+                "isps": ["telkomsel", "indosat"]
+              },
+              {
+                "name": "cloudfront",
+                "bugDomain": "aws.amazon.com",
+                "priority": 90,
+                "isps": ["xl"]
+              },
+              {
+                "name": "fastly",
+                "bugDomain": "wa.me",
+                "priority": 80,
+                "isps": ["indosat"]
+              }
+            ],
+            "healthCheck": {
+              "enabled": true,
+              "interval": "30s",
+              "timeout": "5s"
+            },
+            "failover": {
+              "maxRetries": 3,
+              "blacklistDuration": "5m",
+              "fallbackToSingle": true
+            }
+          }
+        },
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "your-server.com"
+          }
+        }
+      },
+      "mux": {
+        "enabled": true,
+        "concurrency": 8
+      }
+    }
+  ]
+}

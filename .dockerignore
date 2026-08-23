@@ -1,0 +1,83 @@
+# .dockerignore - Exclude unnecessary files from Docker build context
+
+# Git
+.git
+.gitignore
+.gitmodules
+.github
+
+# Build artifacts
+build_assets/
+dist/
+*.exe
+*.out
+*.test
+xray
+xray-*
+
+# Go
+*.so
+*.dylib
+*.dll
+*.a
+vendor/
+go.work
+go.work.sum
+
+# Testing
+coverage.out
+coverage.txt
+*.coverprofile
+test-config.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation
+*.md
+!README.md
+docs/
+examples/
+
+# CI/CD
+.github/workflows/
+.github/scripts/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Android
+*.apk
+*.aab
+*.aar
+android-ndk-*/
+
+# Archives
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+
+# Signed APKs
+signed_apks/
+onering_apk_final/
+
+# Backup files
+*.bak
+*.backup
+backup.log

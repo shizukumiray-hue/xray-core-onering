@@ -1,0 +1,69 @@
+{
+  "log": {
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "your-server.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "your-uuid-here",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "onering-multi:your-server.com",
+          "fingerprint": "chrome",
+          "multiCDN": {
+            "enabled": true,
+            "strategy": "health-based",
+            "providers": [
+              {
+                "name": "cloudflare",
+                "bugDomain": "zoom.us",
+                "priority": 100
+              },
+              {
+                "name": "cloudfront",
+                "bugDomain": "teams.microsoft.com",
+                "priority": 90
+              }
+            ],
+            "evasion": {
+              "enableJitter": true,
+              "enableRotation": true,
+              "randomizeTLS": true
+            }
+          }
+        },
+        "wsSettings": {
+          "path": "/",
+          "headers": {
+            "Host": "your-server.com"
+          }
+        }
+      }
+    }
+  ]
+}

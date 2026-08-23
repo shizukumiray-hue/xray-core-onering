@@ -1,0 +1,358 @@
+{
+  "description": "Multi-CDN Security Test Cases - These configs are REJECTED by the parser",
+  "malicious_examples": {
+    "1_too_many_providers": {
+      "description": "Exceeds MaxProviders limit (50)",
+      "error_expected": "too many providers: maximum 50 allowed",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": "/* 100 providers - exceeds limit */"
+            }
+          }
+        }
+      }
+    },
+    "2_negative_duration": {
+      "description": "Negative health check interval",
+      "error_expected": "healthCheck interval must be positive",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com"}
+              ],
+              "healthCheck": {
+                "interval": "-30s"
+              }
+            }
+          }
+        }
+      }
+    },
+    "3_excessive_timeout": {
+      "description": "Timeout exceeds maximum (30s)",
+      "error_expected": "healthCheck timeout too long: maximum 30s",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com"}
+              ],
+              "healthCheck": {
+                "timeout": "999999h"
+              }
+            }
+          }
+        }
+      }
+    },
+    "4_ssrf_file_scheme": {
+      "description": "SSRF attempt using file:// scheme",
+      "error_expected": "healthCheck URL must use http or https scheme",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com"}
+              ],
+              "healthCheck": {
+                "url": "file:///etc/passwd"
+              }
+            }
+          }
+        }
+      }
+    },
+    "5_ssrf_loopback": {
+      "description": "SSRF attempt targeting loopback address",
+      "error_expected": "healthCheck URL cannot target loopback address",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com"}
+              ],
+              "healthCheck": {
+                "url": "http://127.0.0.1/admin"
+              }
+            }
+          }
+        }
+      }
+    },
+    "6_ssrf_private_ip": {
+      "description": "SSRF attempt targeting private IP",
+      "error_expected": "healthCheck URL cannot target private IP",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com"}
+              ],
+              "healthCheck": {
+                "url": "http://192.168.1.1/router"
+              }
+            }
+          }
+        }
+      }
+    },
+    "7_ssrf_link_local": {
+      "description": "SSRF attempt targeting link-local address",
+      "error_expected": "healthCheck URL target is not a valid public address",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com"}
+              ],
+              "healthCheck": {
+                "url": "http://169.254.1.1/metadata"
+              }
+            }
+          }
+        }
+      }
+    },
+    "8_excessive_retries": {
+      "description": "MaxRetries exceeds limit (10)",
+      "error_expected": "maxRetries exceeds limit of 10",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com"}
+              ],
+              "failover": {
+                "maxRetries": 999999
+              }
+            }
+          }
+        }
+      }
+    },
+    "9_invalid_domain_special_chars": {
+      "description": "Bug domain contains special characters",
+      "error_expected": "has invalid bugDomain",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "test@#$.com"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "10_invalid_domain_too_long": {
+      "description": "Bug domain exceeds DNS length limit (253 chars)",
+      "error_expected": "bugDomain too long (max 253 chars)",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "11_duplicate_provider_names": {
+      "description": "Multiple providers with same name",
+      "error_expected": "duplicate provider name",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "cloudflare", "bugDomain": "zoom.us"},
+                {"name": "cloudflare", "bugDomain": "teams.microsoft.com"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "12_invalid_priority_range": {
+      "description": "Priority outside valid range (1-100)",
+      "error_expected": "priority must be between 1 and 100",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "test", "bugDomain": "example.com", "priority": 999}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "13_too_many_isps": {
+      "description": "Provider has more than 20 ISPs",
+      "error_expected": "has too many ISPs (max 20)",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {
+                  "name": "test",
+                  "bugDomain": "example.com",
+                  "isps": ["isp1","isp2","isp3","isp4","isp5","isp6","isp7","isp8","isp9","isp10","isp11","isp12","isp13","isp14","isp15","isp16","isp17","isp18","isp19","isp20","isp21"]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "valid_examples": {
+    "minimal_config": {
+      "description": "Minimal valid multi-CDN config",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "providers": [
+                {"name": "cloudflare", "bugDomain": "zoom.us"}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "full_config": {
+      "description": "Complete valid multi-CDN config with all options",
+      "config": {
+        "streamSettings": {
+          "network": "tcp",
+          "security": "tls",
+          "tlsSettings": {
+            "serverName": "onering-multi:example.com",
+            "multiCDN": {
+              "enabled": true,
+              "strategy": "health-based",
+              "providers": [
+                {
+                  "name": "cloudflare",
+                  "bugDomain": "zoom.us",
+                  "priority": 100,
+                  "isps": ["telkomsel", "indosat"]
+                },
+                {
+                  "name": "cloudfront",
+                  "bugDomain": "aws.amazon.com",
+                  "priority": 90,
+                  "isps": ["xl", "smartfren"]
+                }
+              ],
+              "healthCheck": {
+                "enabled": true,
+                "interval": "30s",
+                "timeout": "5s",
+                "url": "https://cloudflare.com/cdn-cgi/trace"
+              },
+              "failover": {
+                "maxRetries": 3,
+                "blacklistDuration": "5m",
+                "fallbackToSingle": true
+              },
+              "evasion": {
+                "enableRotation": true,
+                "rotateInterval": "10m",
+                "enableJitter": true
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "security_limits": {
+    "max_providers": 50,
+    "max_provider_name_length": 64,
+    "max_bug_domain_length": 253,
+    "max_isps_per_provider": 20,
+    "max_isp_name_length": 64,
+    "priority_range": "1-100",
+    "health_check_interval_range": "5s-1h",
+    "health_check_timeout_range": "1s-30s",
+    "blacklist_duration_range": "10s-1h",
+    "rotate_interval_range": "1m-24h",
+    "max_failover_retries": 10,
+    "max_health_check_url_length": 2048,
+    "allowed_url_schemes": ["http", "https"],
+    "blocked_url_targets": ["loopback", "private IPs", "link-local", "multicast"]
+  }
+}

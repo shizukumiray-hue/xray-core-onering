@@ -1,0 +1,76 @@
+# Multi-stage build for Xray-Core Onering Multi-CDN
+FROM golang:1.26-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git build-base
+
+# Set working directory
+WORKDIR /build
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build arguments
+ARG VERSION=dev
+ARG BUILD_DATE
+ARG VCS_REF
+
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -buildvcs=false \
+    -gcflags="all=-l=4" \
+    -ldflags="-X github.com/xtls/xray-core/core.build=${VERSION} -s -w -buildid=" \
+    -o /build/xray \
+    ./main
+
+# Final stage
+FROM alpine:latest
+
+# Install ca-certificates for TLS
+RUN apk add --no-cache ca-certificates tzdata
+
+# Create user and group
+RUN addgroup -S xray && adduser -S xray -G xray
+
+# Copy binary from builder
+COPY --from=builder /build/xray /usr/local/bin/xray
+
+# Create config directory
+RUN mkdir -p /etc/xray /var/log/xray && \
+    chown -R xray:xray /etc/xray /var/log/xray
+
+# Copy sample config
+COPY --chown=xray:xray .github/docker/config-multicdn-sample.json /etc/xray/config.json.sample
+
+# Set user
+USER xray
+
+# Expose ports (default SOCKS proxy port)
+EXPOSE 10808
+
+# Volume for config and logs
+VOLUME ["/etc/xray", "/var/log/xray"]
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD xray version || exit 1
+
+# Labels
+LABEL org.opencontainers.image.title="Xray-Core Onering Multi-CDN"
+LABEL org.opencontainers.image.description="Xray-Core with Multi-CDN anti-DPI bypass support"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.revision="${VCS_REF}"
+LABEL org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}"
+LABEL org.opencontainers.image.licenses="MPL-2.0"
+
+# Run xray
+ENTRYPOINT ["/usr/local/bin/xray"]
+CMD ["run", "-config", "/etc/xray/config.json"]
