@@ -285,7 +285,7 @@ jobs:
           check-latest: true
 
       - name: Download linux-64 binary
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: xray-linux-64
           path: ./bin
