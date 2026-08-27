@@ -8,9 +8,9 @@ on:
       - 'feature/**'
   pull_request:
     types: [opened, synchronize, reopened]
-  schedule:
+  #schedule:
     # Run tests daily at 00:00 UTC
-    - cron: '0 0 * * *'
+    #- cron: '0 0 * * *'
   workflow_dispatch:
 
 env:
